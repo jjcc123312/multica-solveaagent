@@ -71,9 +71,13 @@ func NewS3StorageFromEnv() *S3Storage {
 	endpointURL := os.Getenv("AWS_ENDPOINT_URL")
 	s3Opts := []func(*s3.Options){}
 	if endpointURL != "" {
+		// Aliyun OSS / Cloudflare R2 / Backblaze B2 require virtual-hosted style;
+		// MinIO and a few other S3-compatible stores need path style.
+		// Default to virtual-hosted (false). Set S3_FORCE_PATH_STYLE=true to opt in.
+		usePathStyle := os.Getenv("S3_FORCE_PATH_STYLE") == "true"
 		s3Opts = append(s3Opts, func(o *s3.Options) {
 			o.BaseEndpoint = aws.String(endpointURL)
-			o.UsePathStyle = true
+			o.UsePathStyle = usePathStyle
 		})
 	}
 
