@@ -78,6 +78,14 @@ func NewS3StorageFromEnv() *S3Storage {
 		s3Opts = append(s3Opts, func(o *s3.Options) {
 			o.BaseEndpoint = aws.String(endpointURL)
 			o.UsePathStyle = usePathStyle
+			// aws-sdk-go-v2 v1.66+ defaults to flexible-checksum + chunked
+			// transfer encoding for PutObject, which OSS rejects with
+			// "aws-chunked encoding is not supported with the specified
+			// x-amz-content-sha256 value". Fall back to the legacy
+			// single-shot signed payload by only computing checksums when
+			// the operation actually requires one.
+			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+			o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 		})
 	}
 
