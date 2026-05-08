@@ -1,0 +1,96 @@
+name: Deploy Web to ECS
+
+on:
+  workflow_run:
+    workflows: ["Build & Push Web to GHCR"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要部署的 tag（默认：触发本次 deploy 的那次 build 的 short sha）'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: deploy-web
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    environment:
+      name: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve target tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          elif [ -n "${{ github.event.workflow_run.head_sha }}" ]; then
+            TAG=$(echo "${{ github.event.workflow_run.head_sha }}" | cut -c1-7)
+          else
+            TAG=$(git rev-parse --short=7 HEAD)
+          fi
+          echo "value=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: $TAG"
+
+      - name: Deploy to ECS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.ECS_HOST }}
+          username: ${{ secrets.ECS_USER }}
+          key: ${{ secrets.ECS_SSH_KEY }}
+          port: ${{ secrets.ECS_SSH_PORT || 22 }}
+          command_timeout: 5m
+          script: |
+            set -e
+            NEW_TAG="${{ steps.tag.outputs.value }}"
+            cd /opt/multica
+
+            PREV_TAG=$(grep '^MULTICA_WEB_TAG=' .env | cut -d= -f2 || echo "")
+            echo "==> Previous: ${PREV_TAG:-<none>}, New: $NEW_TAG"
+
+            if [ "$NEW_TAG" = "$PREV_TAG" ]; then
+              echo "==> Already at $NEW_TAG, nothing to do"
+              exit 0
+            fi
+
+            BACKUP=".env.bak.$(date +%s)"
+            cp .env "$BACKUP"
+            echo "==> Backup: $BACKUP"
+
+            if grep -q '^MULTICA_WEB_TAG=' .env; then
+              sed -i "s|^MULTICA_WEB_TAG=.*|MULTICA_WEB_TAG=$NEW_TAG|" .env
+            else
+              echo "MULTICA_WEB_TAG=$NEW_TAG" >> .env
+            fi
+
+            echo "==> Pulling frontend image"
+            docker compose pull frontend
+
+            echo "==> Recreating frontend container"
+            docker compose up -d frontend
+
+            echo "==> Smoke test / (max 60s)"
+            for i in $(seq 1 12); do
+              sleep 5
+              if curl -sf -m 3 -o /dev/null http://127.0.0.1:3000/; then
+                echo "✓ Healthy after $((i*5))s — deploy succeeded ($NEW_TAG)"
+                exit 0
+              fi
+            done
+
+            echo "✗ Frontend / failed after 60s, rolling back to ${PREV_TAG:-<none>}"
+            cp "$BACKUP" .env
+            docker compose up -d frontend
+            exit 1
